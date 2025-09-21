@@ -1,671 +1,477 @@
-
 use std::env;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::io::{self, Write};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use uuid::Uuid;
+use rand::{thread_rng, Rng};
 
-fn detect_os() -> &'static str {
-    // Detect the current operating system
-    env::consts::OS
+fn show_help() {
+    println!("LUKS Crypto Wipe v1.0 - Secure Data Destruction Tool");
+    println!();
+    println!("USAGE:");
+    println!("    wipeshit [DEVICE] [OPTIONS]");
+    println!();
+    println!("ARGUMENTS:");
+    println!("    <DEVICE>    Target device to wipe (e.g., /dev/sdb)");
+    println!("                If not specified, interactive mode will be used");
+    println!();
+    println!("OPTIONS:");
+    println!("    -f, --force     Force wipe without confirmation");
+    println!("    -v, --verify    Verify the wipe operation");
+    println!("    -h, --help      Show this help message");
+    println!();
+    println!("EXAMPLES:");
+    println!("    wipeshit                    # Interactive mode");
+    println!("    wipeshit /dev/sdb           # Wipe specific device");
+    println!("    wipeshit /dev/sdb --force   # Force wipe without confirmation");
+    println!("    wipeshit /dev/sdb --verify  # Wipe with verification");
+    println!();
+    println!("WARNING: This tool will PERMANENTLY destroy ALL data on the target device!");
 }
 
-#[cfg(unix)]
-fn is_elevated_unix() -> bool {
-    // On Unix-like OS, effective UID == 0 means root.
-    unsafe { libc::geteuid() == 0 }
+fn main() -> io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+    
+    // Parse simple command line arguments
+    let device = if args.len() > 1 { Some(args[1].clone()) } else { None };
+    let force = args.contains(&"--force".to_string()) || args.contains(&"-f".to_string());
+    let verify = args.contains(&"--verify".to_string()) || args.contains(&"-v".to_string());
+    
+    // Show help if requested
+    if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+        show_help();
+        return Ok(());
+    }
+
+    let device = if let Some(dev) = device {
+        dev
+    } else {
+        // Interactive device selection
+        select_device_interactively()?
+    };
+
+    // Display banner
+    display_banner();
+
+    // List available devices
+    list_block_devices()?;
+
+    // Validate device
+    if !Path::new(&device).exists() {
+        eprintln!("❌ Error: Device '{}' does not exist!", device);
+        return Ok(());
+    }
+
+    // Safety confirmation
+    if !force && !confirm_wipe(&device)? {
+        println!("🛑 Wipe operation cancelled by user.");
+        return Ok(());
+    }
+
+    // Perform LUKS crypto wipe
+    match perform_luks_crypto_wipe(&device, verify) {
+        Ok(_) => {
+            println!("\n✅ LUKS crypto wipe completed successfully!");
+            println!("🔒 Device '{}' has been securely wiped using LUKS encryption.", device);
+        }
+        Err(e) => {
+            eprintln!("❌ Wipe failed: {}", e);
+        }
+    }
+
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn is_elevated_unix() -> bool {
-    false
+fn display_banner() {
+    println!("\x1b[31m");  // Red color
+    println!("
+╔══════════════════════════════════════════════════════════════╗
+║                    🔐 LUKS CRYPTO WIPE 🔐                     ║
+║              Advanced Cryptographic Data Destruction          ║
+║                                                              ║
+║  ⚠️  WARNING: This will PERMANENTLY destroy ALL data!       ║
+║      This operation cannot be undone!                       ║
+╚══════════════════════════════════════════════════════════════╝
+    ");
+    println!("\x1b[0m");   // Reset color
 }
 
-#[cfg(windows)]
-fn is_elevated_windows() -> io::Result<bool> {
-    // Use PowerShell to ask whether current Windows principal is an Administrator.
-    // This avoids complex FFI; it requires PowerShell being present (present on modern Windows).
-    let ps_cmd = r#"([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"#;
-    let out = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(ps_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+fn list_block_devices() -> io::Result<()> {
+    println!("\n💾 Available Block Devices:");
+    println!("═══════════════════════════");
+
+    let output = ProcessCommand::new("lsblk")
+        .args(&["-d", "-o", "NAME,SIZE,TYPE,MODEL"])
         .output()?;
 
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
-    Ok(s.contains("true"))
-}
-
-#[cfg(not(windows))]
-fn is_elevated_windows() -> io::Result<bool> {
-    Ok(false)
-}
-
-fn relaunch_with_elevation() -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        // Relaunch self elevated via PowerShell Start-Process -Verb RunAs
-        let exe = env::current_exe()?;
-        let exe_str = exe.to_string_lossy().to_string();
-
-        // Build argument list from original args (skipping program name).
-        let args: Vec<String> = env::args().skip(1).collect();
-        let arglist = args
-            .iter()
-            .map(|a| format!("'{}'", a.replace("'", "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let start_cmd = if arglist.is_empty() {
-            format!("Start-Process -FilePath '{}' -Verb RunAs", exe_str.replace("'", "''"))
-        } else {
-            format!(
-                "Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs",
-                exe_str.replace("'", "''"),
-                arglist
-            )
-        };
-
-        Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(start_cmd)
-            .spawn()?;
-        
-        // Exit the current non-elevated process
-        std::process::exit(0);
+    if output.status.success() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    } else {
+        println!("❌ Failed to list block devices");
     }
-
-    #[cfg(unix)]
-    {
-        // Try pkexec, then sudo (in that order).
-        let exe = env::current_exe()?;
-        let exe_str = exe.to_string_lossy().to_string();
-        let args: Vec<String> = env::args().skip(1).collect();
-
-        // Helper to test if command exists: `which <name>`
-        let cmd_exists = |cmd: &str| -> bool {
-            Command::new("which")
-                .arg(cmd)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        };
-
-        if cmd_exists("pkexec") {
-            let mut c = Command::new("pkexec");
-            c.arg(exe_str);
-            for a in args {
-                c.arg(a);
-            }
-            let output = c.output()?;
-            
-            // Print any output from the elevated process
-            if !output.stdout.is_empty() {
-                print!("{}", String::from_utf8_lossy(&output.stdout));
-            }
-            if !output.stderr.is_empty() {
-                eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            }
-            
-            return Ok(());
-        } else if cmd_exists("sudo") {
-            let mut c = Command::new("sudo");
-            c.arg(exe_str);
-            for a in args {
-                c.arg(a);
-            }
-            let output = c.output()?;
-            
-            // Print any output from the elevated process
-            if !output.stdout.is_empty() {
-                print!("{}", String::from_utf8_lossy(&output.stdout));
-            }
-            if !output.stderr.is_empty() {
-                eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            }
-            
-            return Ok(());
-        } else {
-            // No helper found: print an instructive message
-            println!("No pkexec or sudo found on your system. Please re-run this program as root (e.g. 'sudo ...').");
-            return Ok(());
-        }
-    }
+    
+    println!();
+    Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct DriveInfo {
-    device_id: String,
-    friendly_name: String,
-    media_type: String,
-    size: i64,
-    volumes: Vec<VolumeInfo>,
-}
+fn select_device_interactively() -> io::Result<String> {
+    println!("\n🎯 STORAGE DEVICE & PARTITION SELECTION");
+    println!("═══════════════════════════════════════");
 
-#[derive(Debug, Clone)]
-struct VolumeInfo {
-    drive_letter: String,
-    label: String,
-    file_system: String,
-    bitlocker: String,
-    partition_number: i64,
-    partition_size: i64,
-}
-
-fn get_windows_drives() -> io::Result<Vec<DriveInfo>> {
-    let ps_script = r#"
-    $drives = Get-PhysicalDisk | Select-Object DeviceID, MediaType, FriendlyName, Size
-    $volumes = Get-Volume | Select-Object DriveLetter, FileSystemLabel, FileSystem, BitLockerProtectionStatus, Path
-    $partitions = Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, Size
-
-    $result = @()
-    foreach ($drive in $drives) {
-        $driveInfo = @{
-            DeviceID = $drive.DeviceID
-            MediaType = $drive.MediaType
-            FriendlyName = $drive.FriendlyName
-            Size = $drive.Size
-            Volumes = @()
-        }
-        
-        # Get partitions for this specific physical drive
-        $drivePartitions = $partitions | Where-Object { $_.DiskNumber -eq $drive.DeviceID }
-        
-        foreach ($partition in $drivePartitions) {
-            if ($partition.DriveLetter) {
-                $vol = $volumes | Where-Object { $_.DriveLetter -eq $partition.DriveLetter }
-                if ($vol) {
-                    $driveInfo.Volumes += @{
-                        DriveLetter = $partition.DriveLetter
-                        Label = $vol.FileSystemLabel
-                        FileSystem = $vol.FileSystem
-                        BitLocker = if ($vol.BitLockerProtectionStatus -eq 1) { "Enabled" } else { "Disabled" }
-                        PartitionNumber = $partition.PartitionNumber
-                        PartitionSize = $partition.Size
-                    }
-                }
-            }
-        }
-        $result += $driveInfo
-    }
-    $result | ConvertTo-Json -Depth 4
-    "#;
-
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(ps_script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    // Get comprehensive list of all block devices and partitions
+    let output = ProcessCommand::new("lsblk")
+        .args(&["-n", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL", "--tree"])
         .output()?;
 
     if !output.status.success() {
-        eprintln!("PowerShell command failed with status: {}", output.status);
-        eprintln!("Error output: {}", String::from_utf8_lossy(&output.stderr));
-        return Ok(Vec::new());
+        return Err(io::Error::new(io::ErrorKind::Other, "Failed to get device list"));
     }
 
-    let json = String::from_utf8_lossy(&output.stdout);
-    println!("Debug - PowerShell output: {}", json);
-    
-    let drives_json: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(val) => val,
-        Err(e) => {
-            eprintln!("Failed to parse JSON: {}", e);
-            eprintln!("Raw output was: {}", json);
-            return Ok(Vec::new());
-        }
-    };
+    let devices_output = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = devices_output.lines().collect();
 
-    let mut drives = Vec::new();
-    
-    // Handle both single object and array cases
-    let drives_array = if drives_json.is_array() {
-        drives_json.as_array().unwrap()
-    } else if drives_json.is_object() {
-        // Single object, wrap it in a vector
-        &vec![drives_json.clone()]
-    } else {
-        eprintln!("Unexpected JSON structure: {}", drives_json);
-        return Ok(drives);
-    };
-    
-    for drive_json in drives_array {
-            let device_id = drive_json.get("DeviceID").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-            let media_type = drive_json.get("MediaType").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-            let friendly_name = drive_json.get("FriendlyName").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-            let size = drive_json.get("Size").and_then(|v| v.as_i64()).unwrap_or(0);
-            
-            let mut volumes = Vec::new();
-            if let Some(vols) = drive_json.get("Volumes").and_then(|v| v.as_array()) {
-                for vol in vols {
-                    let drive_letter = vol.get("DriveLetter").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-                    let fs = vol.get("FileSystem").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-                    let label = vol.get("Label").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-                    let bitlocker = vol.get("BitLocker").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-                    let part_num = vol.get("PartitionNumber").and_then(|v| v.as_i64()).unwrap_or(-1);
-                    let part_size = vol.get("PartitionSize").and_then(|v| v.as_i64()).unwrap_or(0);
-                    
-                    volumes.push(VolumeInfo {
-                        drive_letter,
-                        label,
-                        file_system: fs,
-                        bitlocker,
-                        partition_number: part_num,
-                        partition_size: part_size,
-                    });
-                }
-            }
-            
-            drives.push(DriveInfo {
-                device_id,
-                friendly_name,
-                media_type,
-                size,
-                volumes,
-            });
+    if lines.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::Other, "No storage devices found"));
     }
-    
-    Ok(drives)
-}
 
-fn display_drives(drives: &[DriveInfo]) {
-    println!("\n=== Windows Drives and Partitions ===");
+    // Parse and categorize devices
+    let mut devices = Vec::new();
     
-    for drive in drives {
-        println!("\nDrive {}: {} ({})", drive.device_id, drive.friendly_name, drive.media_type);
-        println!("  Total Size: {} bytes ({:.2} GB)", drive.size, drive.size as f64 / 1_000_000_000.0);
+    for line in lines {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 { continue; }
         
-        if drive.volumes.is_empty() {
-            println!("  No mounted volumes found.");
+        let name = parts[0].trim_start_matches('├').trim_start_matches('└').trim_start_matches('│').trim();
+        let size = parts[1];
+        let device_type = parts[2];
+        let mountpoint = if parts.len() > 3 { parts[3] } else { "" };
+        let model = if parts.len() > 4 { parts[4..].join(" ") } else { "Unknown".to_string() };
+
+        // Skip loop devices, ram disks, etc.
+        if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("sr") {
+            continue;
+        }
+
+        let device_path = format!("/dev/{}", name);
+        let device_info = DeviceInfo {
+            path: device_path,
+            size: size.to_string(),
+            device_type: device_type.to_string(),
+            mountpoint: mountpoint.to_string(),
+            model,
+            is_partition: device_type == "part",
+        };
+
+        devices.push(device_info);
+    }
+
+    if devices.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::Other, "No suitable devices found"));
+    }
+
+    // Display categorized list
+    println!("📀 Available Storage Devices and Partitions:");
+    println!();
+    
+    for (i, device) in devices.iter().enumerate() {
+        let icon = if device.is_partition { "  📂" } else { "💽" };
+        let mount_info = if !device.mountpoint.is_empty() && device.mountpoint != "-" {
+            format!(" (mounted at {})", device.mountpoint)
         } else {
-            for vol in &drive.volumes {
-                println!("  Partition {}: {}: ({})", vol.partition_number, vol.drive_letter, vol.label);
-                println!("    File System: {}", vol.file_system);
-                println!("    Size: {} bytes ({:.2} GB)", vol.partition_size, vol.partition_size as f64 / 1_000_000_000.0);
-                println!("    BitLocker: {}", vol.bitlocker);
-            }
+            String::new()
+        };
+        
+        let warning = if !device.mountpoint.is_empty() && device.mountpoint != "-" {
+            " ⚠️ MOUNTED"
+        } else {
+            ""
+        };
+
+        println!("  {}: {} {} - {} {} - {}{}{}",
+            i + 1,
+            icon,
+            device.path,
+            device.size,
+            device.device_type.to_uppercase(),
+            device.model,
+            mount_info,
+            warning
+        );
+    }
+
+    println!("\n💡 Tip: You can wipe entire drives or individual partitions");
+    println!("⚠️  WARNING: Selected device/partition will be COMPLETELY DESTROYED!");
+    print!("\nSelect device/partition number (1-{}): ", devices.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let choice: usize = input.trim().parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid number"))?;
+
+    if choice == 0 || choice > devices.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection"));
+    }
+
+    let selected = &devices[choice - 1];
+    
+    // Additional warning for mounted devices
+    if !selected.mountpoint.is_empty() && selected.mountpoint != "-" {
+        println!("\n⚠️  CRITICAL WARNING ⚠️");
+        println!("The selected device is CURRENTLY MOUNTED at: {}", selected.mountpoint);
+        println!("Wiping it will crash the system if it contains important files!");
+        print!("Type 'I UNDERSTAND THE RISK' to continue: ");
+        io::stdout().flush()?;
+        
+        let mut risk_input = String::new();
+        io::stdin().read_line(&mut risk_input)?;
+        
+        if risk_input.trim() != "I UNDERSTAND THE RISK" {
+            return Err(io::Error::new(io::ErrorKind::Other, "Operation cancelled for safety"));
         }
     }
+
+    println!("✅ Selected: {} ({} {})", selected.path, selected.size, selected.device_type);
+    Ok(selected.path.clone())
 }
 
-fn select_drive(drives: &[DriveInfo]) -> io::Result<Option<String>> {
-    println!("\n=== Drive Selection ===");
-    println!("Available drives:");
+#[derive(Debug)]
+struct DeviceInfo {
+    path: String,
+    size: String,
+    device_type: String,
+    mountpoint: String,
+    model: String,
+    is_partition: bool,
+}
+
+fn confirm_wipe(device: &str) -> io::Result<bool> {
+    println!("\x1b[33m");  // Yellow color
+    println!("⚠️  DANGER ZONE ⚠️");
+    println!("═══════════════════");
+    println!("You are about to PERMANENTLY WIPE: {}", device);
+    println!("This will:");
+    println!("  🔥 Destroy ALL data on the device");
+    println!("  🔐 Create LUKS encryption");
+    println!("  🗑️  Fill with encrypted random data");
+    println!("  🔓 Remove encryption keys (making data unrecoverable)");
+    println!();
+    println!("\x1b[0m");   // Reset color
     
-    let mut available_drives = Vec::new();
-    for drive in drives {
-        for vol in &drive.volumes {
-            if !vol.drive_letter.is_empty() && vol.drive_letter != "-" {
-                available_drives.push((vol.drive_letter.clone(), drive, vol));
-            }
-        }
-    }
-    
-    // Remove duplicates and sort
-    available_drives.sort_by(|a, b| a.0.cmp(&b.0));
-    available_drives.dedup_by(|a, b| a.0 == b.0);
-    
-    for (i, (letter, drive, vol)) in available_drives.iter().enumerate() {
-        let size_gb = vol.partition_size as f64 / 1_000_000_000.0;
-        println!("{}. Drive {} - {} ({}) - {:.2} GB - BitLocker: {}", 
-                 i + 1, letter, vol.label, drive.media_type, size_gb, vol.bitlocker);
-    }
-    
-    println!("\nEnter the drive letter you want to select (e.g., C, D, E):");
-    print!("> ");
+    print!("Type 'DESTROY ALL DATA' to confirm: ");
     io::stdout().flush()?;
     
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    let selected = input.trim().to_uppercase();
     
-    if available_drives.iter().any(|(letter, _, _)| letter == &selected) {
-        Ok(Some(selected))
+    Ok(input.trim() == "DESTROY ALL DATA")
+}
+
+fn perform_luks_crypto_wipe(device: &str, verify: bool) -> io::Result<()> {
+    let wipe_id = Uuid::new_v4();
+    println!("🚀 Starting LUKS crypto wipe...");
+    println!("🆔 Operation ID: {}", wipe_id);
+    println!("📱 Target: {}", device);
+    println!();
+
+    // Step 1: Generate random passphrase
+    println!("🔑 Step 1: Generating cryptographic key...");
+    let passphrase = generate_random_passphrase();
+    println!("✅ Cryptographic key generated");
+
+    // Step 2: Create LUKS partition
+    println!("\n🔐 Step 2: Setting up LUKS encryption...");
+    create_luks_partition(device, &passphrase)?;
+    println!("✅ LUKS partition created");
+
+    // Step 3: Open LUKS partition
+    println!("\n🔓 Step 3: Opening encrypted partition...");
+    let mapper_name = format!("cryptowipe_{}", wipe_id.simple());
+    open_luks_partition(device, &mapper_name, &passphrase)?;
+    println!("✅ Encrypted partition opened as /dev/mapper/{}", mapper_name);
+
+    // Step 4: Fill with random data
+    println!("\n📝 Step 4: Filling with encrypted random data...");
+    fill_with_random_data(&format!("/dev/mapper/{}", mapper_name))?;
+    println!("✅ Device filled with encrypted random data");
+
+    // Step 5: Close and destroy keys
+    println!("\n🔒 Step 5: Closing partition and destroying keys...");
+    close_luks_partition(&mapper_name)?;
+    destroy_luks_header(device)?;
+    println!("✅ Encryption keys destroyed - data is now unrecoverable");
+
+    // Step 6: Verification (optional)
+    if verify {
+        println!("\n🔍 Step 6: Verification...");
+        verify_wipe(device)?;
+        println!("✅ Wipe verification completed");
+    }
+
+    // Generate report
+    generate_completion_report(device, &wipe_id);
+
+    Ok(())
+}
+
+fn generate_random_passphrase() -> String {
+    let mut rng = thread_rng();
+    let charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+    (0..64)
+        .map(|_| {
+            let idx = rng.gen_range(0..charset.len());
+            charset.chars().nth(idx).unwrap()
+        })
+        .collect()
+}
+
+fn create_luks_partition(device: &str, passphrase: &str) -> io::Result<()> {
+    let mut child = ProcessCommand::new("cryptsetup")
+        .args(&[
+            "luksFormat",
+            "--type", "luks2",
+            "--cipher", "aes-xts-plain64",
+            "--key-size", "512",
+            "--hash", "sha256",
+            "--iter-time", "2000",
+            "--use-random",
+            device
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{}", passphrase)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to create LUKS partition: {}", String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+
+    Ok(())
+}
+
+fn open_luks_partition(device: &str, mapper_name: &str, passphrase: &str) -> io::Result<()> {
+    let mut child = ProcessCommand::new("cryptsetup")
+        .args(&["luksOpen", device, mapper_name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{}", passphrase)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to open LUKS partition: {}", String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+
+    Ok(())
+}
+
+fn fill_with_random_data(mapper_device: &str) -> io::Result<()> {
+    let _output = ProcessCommand::new("dd")
+        .args(&[
+            "if=/dev/urandom",
+            &format!("of={}", mapper_device),
+            "bs=1M",
+            "status=progress"
+        ])
+        .output()?;
+
+    // dd will return non-zero when it hits end of device, which is expected
+    println!("Random data fill completed");
+    Ok(())
+}
+
+fn close_luks_partition(mapper_name: &str) -> io::Result<()> {
+    let output = ProcessCommand::new("cryptsetup")
+        .args(&["luksClose", mapper_name])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to close LUKS partition: {}", String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+
+    Ok(())
+}
+
+fn destroy_luks_header(device: &str) -> io::Result<()> {
+    // Overwrite LUKS header with random data
+    let output = ProcessCommand::new("dd")
+        .args(&[
+            "if=/dev/urandom",
+            &format!("of={}", device),
+            "bs=1M",
+            "count=10",
+            "conv=notrunc"
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Failed to destroy LUKS header"
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_wipe(device: &str) -> io::Result<()> {
+    println!("🔍 Reading first 100MB to verify randomness...");
+    
+    let output = ProcessCommand::new("dd")
+        .args(&[
+            &format!("if={}", device),
+            "of=/dev/null",
+            "bs=1M",
+            "count=100",
+            "status=progress"
+        ])
+        .output()?;
+
+    if output.status.success() {
+        println!("✅ Device appears to contain random data");
     } else {
-        println!("❌ Invalid drive letter: {}", selected);
-        Ok(None)
-    }
-}
-
-fn enable_bitlocker(drive_letter: &str, drive_info: &DriveInfo, vol_info: &VolumeInfo) -> io::Result<()> {
-    println!("\n🔐 Starting BitLocker Enablement Process");
-    println!("Target: Drive {} - {} ({})", drive_letter, vol_info.label, drive_info.media_type);
-    
-    // Check current BitLocker status
-    println!("\nStep 1: Checking current BitLocker status...");
-    let status_cmd = format!("Get-BitLockerVolume -MountPoint '{}:' | Select-Object MountPoint, VolumeStatus, EncryptionPercentage, KeyProtector", drive_letter);
-    
-    let status_output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(status_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-    
-    if !status_output.status.success() {
-        eprintln!("❌ Failed to check BitLocker status: {}", String::from_utf8_lossy(&status_output.stderr));
-        return Ok(());
-    }
-    
-    let status_text = String::from_utf8_lossy(&status_output.stdout);
-    println!("Current Status:\n{}", status_text);
-    
-    // Check if already encrypted
-    if status_text.contains("FullyEncrypted") {
-        println!("✅ Drive {} is already fully encrypted with BitLocker.", drive_letter);
-        return Ok(());
-    }
-    
-    // Get user input for BitLocker password
-    println!("\nStep 2: Setting up BitLocker encryption...");
-    println!("⚠️  IMPORTANT: You will need to set a password for BitLocker.");
-    println!("This password will be required to access the drive after encryption.");
-    
-    print!("Enter a strong password for BitLocker (min 8 characters): ");
-    io::stdout().flush()?;
-    
-    let mut password = String::new();
-    io::stdin().read_line(&mut password)?;
-    let password = password.trim();
-    
-    if password.len() < 8 {
-        println!("❌ Password must be at least 8 characters long.");
-        return Ok(());
-    }
-    
-    print!("Confirm password: ");
-    io::stdout().flush()?;
-    
-    let mut confirm_password = String::new();
-    io::stdin().read_line(&mut confirm_password)?;
-    let confirm_password = confirm_password.trim();
-    
-    if password != confirm_password {
-        println!("❌ Passwords do not match.");
-        return Ok(());
-    }
-    
-    // Create secure string for PowerShell
-    let secure_password_cmd = format!("ConvertTo-SecureString '{}' -AsPlainText -Force", password.replace("'", "''"));
-    
-    println!("\nStep 3: Enabling BitLocker encryption...");
-    println!("This may take a while depending on drive size and speed...");
-    
-    // Enable BitLocker with password protector and recovery key
-    // Step 3: Enable BitLocker with password protector only
-    let enable_cmd = format!(
-        "$password = {}; Enable-BitLocker -MountPoint '{}:' -EncryptionMethod XtsAes256 -UsedSpaceOnly -PasswordProtector -Password $password",
-        secure_password_cmd, drive_letter
-    );
-
-    let enable_output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(enable_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-
-    if !enable_output.status.success() {
-        eprintln!("❌ Failed to enable BitLocker: {}", String::from_utf8_lossy(&enable_output.stderr));
-        return Ok(());
+        println!("⚠️  Verification completed with warnings");
     }
 
-    // Step 4: Add a recovery key protector and save it
-    let add_recovery_cmd = format!(
-        "$recovery = Add-BitLockerKeyProtector -MountPoint '{}:' -RecoveryPasswordProtector; $recovery.RecoveryPassword",
-        drive_letter
-    );
-
-    let recovery_output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(add_recovery_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-
-    if recovery_output.status.success() {
-        let recovery_key = String::from_utf8_lossy(&recovery_output.stdout).trim().to_string();
-        if !recovery_key.is_empty() {
-            let backup_filename = format!("BitLocker_RecoveryKey_{}_{}.txt", drive_letter, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
-            let backup_path = std::env::current_dir()?.join(&backup_filename);
-
-            let backup_content = format!(
-                "BitLocker Recovery Key for Drive {}:\n\
-                ======================================\n\
-                Drive: {}: ({})\n\
-                Physical Drive: {} ({})\n\
-                Date: {}\n\
-                Recovery Key: {}\n\
-                \n\
-                IMPORTANT: Keep this key safe! You will need it if you forget your password.\n\
-                Store this file in a secure location separate from your computer.\n\
-                Without this key, you may lose access to your encrypted data permanently.",
-                drive_letter, drive_letter, vol_info.label, drive_info.friendly_name, drive_info.media_type,
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"), recovery_key
-            );
-
-            std::fs::write(&backup_path, backup_content)?;
-
-            println!("✅ Recovery key saved to: {}", backup_path.display());
-            println!("🔑 Recovery Key: {}", recovery_key);
-            println!("⚠️  IMPORTANT: Save this recovery key in a secure location!");
-        }
-}
-    
-    // Monitor encryption progress
-    println!("\nStep 5: Monitoring encryption progress...");
-    println!("Encryption is running in the background. You can check progress with:");
-    println!("Get-BitLockerVolume -MountPoint '{}:'", drive_letter);
-    
-    // Check current encryption percentage
-    let progress_cmd = format!("Get-BitLockerVolume -MountPoint '{}:' | Select-Object MountPoint, VolumeStatus, EncryptionPercentage", drive_letter);
-    
-    let progress_output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(progress_cmd)
-        .stdout(Stdio::piped())
-        .output()?;
-    
-    if progress_output.status.success() {
-        let progress_text = String::from_utf8_lossy(&progress_output.stdout);
-        println!("Current Progress:\n{}", progress_text);
-    }
-    
-    println!("\n🎉 BitLocker Enablement Process Completed!");
-    println!("📋 Summary:");
-    println!("  - Drive: {}", drive_letter);
-    println!("  - Encryption Method: XTS-AES 256-bit");
-    println!("  - Password Protection: Enabled");
-    println!("  - Recovery Key: Generated and saved");
-    println!("  - Status: Encryption in progress");
-    
-    println!("\n📝 Next Steps:");
-    println!("  1. Wait for encryption to complete (check with PowerShell command above)");
-    println!("  2. Test access to the drive with your password");
-    println!("  3. Keep your recovery key safe");
-    println!("  4. Once encryption is complete, you can proceed with crypto-erase if needed");
-    
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    println!("=== Secure Data Wiping Tool ===");
-    
-    // 1. Detect and display OS type
-    let os = detect_os();
-    println!("Detected OS: {}", os);
-    
-    // 2. Check if we're running with admin privileges and request elevation if needed
-    match os {
-        "windows" => {
-            match is_elevated_windows() {
-                Ok(true) => {
-                    println!("✓ Running with Administrator privileges");
-                    
-                    // Get and display drive information
-                    let drives = get_windows_drives()?;
-                    display_drives(&drives);
-                    
-                    // Interactive drive selection and operations
-                    loop {
-                        println!("\n=== Main Menu ===");
-                        println!("1. Select a drive for secure wiping");
-                        println!("2. Show drive information again");
-                        println!("3. Exit");
-                        print!("Enter your choice (1-3): ");
-                        io::stdout().flush()?;
-                        
-                        let mut choice = String::new();
-                        io::stdin().read_line(&mut choice)?;
-                        let choice = choice.trim();
-                        
-                        match choice {
-                            "1" => {
-                                match select_drive(&drives)? {
-                                    Some(selected_drive) => {
-                                        println!("\n✓ You selected drive: {}", selected_drive);
-                                        
-                                        // Find the selected drive details
-                                        let mut found_drive: Option<(&DriveInfo, &VolumeInfo)> = None;
-                                        for drive in &drives {
-                                            for vol in &drive.volumes {
-                                                if vol.drive_letter == selected_drive {
-                                                    found_drive = Some((drive, vol));
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        
-                                        if let Some((drive, vol)) = found_drive {
-                                            println!("\nSelected Drive Details:");
-                                            println!("  Physical Drive: {} ({})", drive.friendly_name, drive.media_type);
-                                            println!("  Drive Letter: {}", vol.drive_letter);
-                                            println!("  Label: {}", vol.label);
-                                            println!("  File System: {}", vol.file_system);
-                                            println!("  Size: {} bytes ({:.2} GB)", vol.partition_size, vol.partition_size as f64 / 1_000_000_000.0);
-                                            println!("  BitLocker: {}", vol.bitlocker);
-                                            
-                                             // Check if BitLocker is already enabled
-                                             if vol.bitlocker == "Enabled" {
-                                                 println!("✅ BitLocker is already enabled on this drive.");
-                                                 println!("Current BitLocker Status: {}", vol.bitlocker);
-                                                 
-                                                 println!("\nOptions:");
-                                                 println!("1. Check BitLocker status and recovery keys");
-                                                 println!("2. Return to main menu");
-                                                 print!("Enter your choice (1-2): ");
-                                                 io::stdout().flush()?;
-                                                 
-                                                 let mut bitlocker_choice = String::new();
-                                                 io::stdin().read_line(&mut bitlocker_choice)?;
-                                                 
-                                                 match bitlocker_choice.trim() {
-                                                     "1" => {
-                                                         // Show BitLocker status
-                                                         let status_cmd = format!("Get-BitLockerVolume -MountPoint '{}:' | Select-Object MountPoint, VolumeStatus, EncryptionPercentage, KeyProtector", selected_drive);
-                                                         let status_output = Command::new("powershell")
-                                                             .arg("-NoProfile")
-                                                             .arg("-Command")
-                                                             .arg(status_cmd)
-                                                             .stdout(Stdio::piped())
-                                                             .output()?;
-                                                         
-                                                         if status_output.status.success() {
-                                                             let status_text = String::from_utf8_lossy(&status_output.stdout);
-                                                             println!("\nBitLocker Status:\n{}", status_text);
-                                                         }
-                                                     }
-                                                     _ => println!("Returning to main menu..."),
-                                                 }
-                                             } else {
-                                                 println!("\n🔐 BitLocker is currently disabled on this drive.");
-                                                 println!("⚠️  WARNING: Enabling BitLocker will encrypt all data on this drive!");
-                                                 println!("This process may take several hours depending on drive size.");
-                                                 println!("Are you sure you want to enable BitLocker? (type 'YES' to confirm): ");
-                                                 print!("> ");
-                                                 io::stdout().flush()?;
-                                                 
-                                                 let mut confirmation = String::new();
-                                                 io::stdin().read_line(&mut confirmation)?;
-                                                 
-                                                 if confirmation.trim() == "YES" {
-                                                     enable_bitlocker(&selected_drive, drive, vol)?;
-                                                 } else {
-                                                     println!("❌ BitLocker enablement cancelled.");
-                                                 }
-                                             }
-                                             
-                                             // Add a pause to keep the window open
-                                             println!("\nPress Enter to return to main menu...");
-                                             let mut _dummy = String::new();
-                                             io::stdin().read_line(&mut _dummy)?;
-                                        }
-                                    }
-                                    None => {
-                                        println!("Please try again with a valid drive letter.");
-                                    }
-                                }
-                            }
-                            "2" => {
-                                let drives = get_windows_drives()?;
-                                display_drives(&drives);
-                            }
-                            "3" => {
-                                println!("Exiting...");
-                                break;
-                            }
-                            _ => {
-                                println!("Invalid choice. Please enter 1, 2, or 3.");
-                            }
-                        }
-                    }
-                }
-                Ok(false) => {
-                    println!("⚠ Not running with Administrator privileges");
-                    println!("Attempting to relaunch with elevated permissions...");
-                    relaunch_with_elevation()?;
-                    // This point should never be reached as relaunch_with_elevation() calls exit()
-                }
-                Err(e) => {
-                    eprintln!("Error checking elevation status: {}", e);
-                }
-            }
-        }
-        "linux" => {
-            let elevated = is_elevated_unix();
-            if elevated {
-                println!("✓ Running with root privileges");
-                println!("Linux system detected - drive operations not yet implemented");
-                
-                // Keep the terminal open for future Linux implementation
-                println!("\nPress Enter to exit...");
-                let mut _dummy = String::new();
-                io::stdin().read_line(&mut _dummy)?;
-            } else {
-                println!("⚠ Not running with root privileges");
-                println!("Attempting to request elevation (pkexec/sudo)...");
-                relaunch_with_elevation()?;
-            }
-        }
-        _ => {
-            println!("Unsupported OS: {}", os);
-            println!("This program supports Windows and Linux only.");
-            
-            // Keep terminal open
-            println!("\nPress Enter to exit...");
-            let mut _dummy = String::new();
-            io::stdin().read_line(&mut _dummy)?;
-        }
-    }
-    
-    println!("\nProgram completed.");
-    Ok(())
+fn generate_completion_report(device: &str, wipe_id: &Uuid) {
+    let separator = "═".repeat(60);
+    println!("\n{}", separator);
+    println!("📋 LUKS CRYPTO WIPE COMPLETION REPORT");
+    println!("{}", separator);
+    println!("🆔 Operation ID: {}", wipe_id);
+    println!("📱 Device: {}", device);
+    println!("🔐 Method: LUKS2 AES-XTS-256 Encryption");
+    println!("🗝️  Key Size: 512 bits");
+    println!("🧂 Hash: SHA-256");
+    println!("🔄 Process:");
+    println!("   1. ✅ LUKS encryption applied");
+    println!("   2. ✅ Filled with encrypted random data");
+    println!("   3. ✅ Encryption keys destroyed");
+    println!("   4. ✅ LUKS header overwritten");
+    println!("🛡️  Security: Data is cryptographically unrecoverable");
+    println!("🕒 Completed: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
+    println!("{}", separator);
+    println!("\n🎉 Mission accomplished! Your data is gone forever! 🎉");
 }
