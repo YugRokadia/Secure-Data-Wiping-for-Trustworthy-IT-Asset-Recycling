@@ -1,0 +1,32 @@
+[package]
+name = "luks-crypto-wipe"
+version = "1.0.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Advanced cryptographic data destruction tool using LUKS encryption"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "wipeshit"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.24"
+egui = "0.24"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+winapi = { version = "0.3.9", features = ["winuser", "windef"] }
+
+[target.'cfg(unix)'.dependencies]
+# Note: This program also requires system commands:
+# - cryptsetup (for LUKS operations)
+# - dd (for data operations) 
+# - lsblk (for device listing)
+# - blockdev (for device info)
+# Install these via: sudo apt install cryptsetup-bin util-linux
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
