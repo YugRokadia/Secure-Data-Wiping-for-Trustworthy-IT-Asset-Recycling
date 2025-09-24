@@ -1,4 +1,5 @@
-mod ui;
+
+mod UI;
 mod core;
 
 use std::env;
@@ -48,7 +49,7 @@ fn main() -> io::Result<()> {
 
     // When no arguments are provided, run in GUI mode
     if device.is_none() {
-        return ui::run_ui().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+        return UI::run_ui().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
     }
 
     // CLI mode with specified device

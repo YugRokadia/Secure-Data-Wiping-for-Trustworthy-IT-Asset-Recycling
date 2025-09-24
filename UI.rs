@@ -3,6 +3,13 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use crate::core;
 
+#[derive(Debug, Clone)]
+enum ProgressMessage {
+    Progress(f32, String),
+    Certificate(String),
+    Error(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum UiState {
     Landing,
@@ -28,8 +35,9 @@ pub struct DriveWipeApp {
     available_drives: Vec<core::DeviceInfo>,
     selected_drive: Option<usize>,
     progress_info: Option<ProgressInfo>,
-    progress_receiver: Option<mpsc::Receiver<(f32, String)>>,
+    progress_receiver: Option<mpsc::Receiver<ProgressMessage>>,
     certificates: Vec<String>,
+    completion_certificate: Option<String>,
     error_message: Option<String>,
     confirmation_text: String,
     dark_mode: bool,
@@ -46,6 +54,7 @@ impl Default for DriveWipeApp {
             progress_info: None,
             progress_receiver: None,
             certificates: Vec::new(),
+            completion_certificate: None,
             error_message: None,
             confirmation_text: String::new(),
             dark_mode: true,
@@ -66,10 +75,24 @@ impl eframe::App for DriveWipeApp {
 
         // Check for progress updates
         if let Some(ref rx) = self.progress_receiver {
-            if let Ok((progress, status)) = rx.try_recv() {
-                if let Some(info) = &mut self.progress_info {
-                    info.progress = progress;
-                    info.status = status;
+            if let Ok(message) = rx.try_recv() {
+                match message {
+                    ProgressMessage::Progress(progress, status) => {
+                        if let Some(info) = &mut self.progress_info {
+                            info.progress = progress;
+                            info.status = status.clone();
+                        }
+                    }
+                    ProgressMessage::Certificate(cert) => {
+                        self.completion_certificate = Some(cert);
+                        self.state = UiState::Completion;
+                        self.progress_receiver = None;
+                    }
+                    ProgressMessage::Error(error_msg) => {
+                        self.error_message = Some(error_msg);
+                        self.state = UiState::DriveSelection;
+                        self.progress_receiver = None;
+                    }
                 }
             }
         }
@@ -476,26 +499,28 @@ impl DriveWipeApp {
             
             ui.colored_label(
                 egui::Color32::LIGHT_GREEN,
-                "All selected devices have been securely wiped!"
+                "Device has been securely wiped!"
             );
             
             ui.add_space(30.0);
             
-            // Show completion certificates
-            if !self.certificates.is_empty() {
-                ui.label("Completion Certificates:");
+            // Show completion certificate
+            if let Some(ref cert) = self.completion_certificate {
+                ui.label("Completion Certificate:");
                 ui.add_space(10.0);
                 
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
-                        for cert in &self.certificates {
-                            ui.group(|ui| {
-                                ui.label(cert);
-                            });
-                            ui.add_space(10.0);
-                        }
+                        ui.group(|ui| {
+                            ui.label(cert);
+                        });
                     });
+            } else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Certificate not available"
+                );
             }
             
             ui.add_space(20.0);
@@ -532,21 +557,45 @@ impl DriveWipeApp {
                 let device_path = drive.path.clone();
                 let verify = self.verify_mode;
                 
+                println!("Starting wipe process for device: {}", device_path);
+                
                 // Start crypto wipe in a separate thread
                 std::thread::spawn(move || {
+                    println!("Thread started for wiping: {}", device_path);
                     let sender = tx.clone();
+                    
+                    // Send initial progress update
+                    let _ = sender.send(ProgressMessage::Progress(0.0, "Starting wipe process...".to_string()));
+                    
                     match core::perform_luks_crypto_wipe(
                         &device_path,
                         verify,
                         move |progress, status| {
-                            let _ = sender.send((progress, status));
+                            println!("Progress: {:.1}% - {}", progress * 100.0, status);
+                            let _ = sender.send(ProgressMessage::Progress(progress, status));
                         },
                     ) {
-                        Ok(cert) => println!("Successfully wiped {}: {}", device_path, cert),
-                        Err(e) => eprintln!("Failed to wipe {}: {}", device_path, e),
+                        Ok(cert) => {
+                            println!("Successfully wiped {}: {}", device_path, cert);
+                            let _ = tx.send(ProgressMessage::Certificate(cert));
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to wipe {}: {}", device_path, e);
+                            let _ = tx.send(ProgressMessage::Error(format!("Wipe failed: {}", e)));
+                        }
                     }
+                    println!("Thread completed for: {}", device_path);
                 });
+                
+            } else {
+                println!("Error: No drive found at selected index");
+                self.error_message = Some("Selected drive not found".to_string());
+                self.state = UiState::DriveSelection;
             }
+        } else {
+            println!("Error: No drive selected");
+            self.error_message = Some("No drive selected".to_string());
+            self.state = UiState::DriveSelection;
         }
     }
     
@@ -567,13 +616,12 @@ impl DriveWipeApp {
 pub fn run_ui() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1920.0, 1080.0])
-            .with_min_inner_size([1920.0, 1080.0])
-            .with_max_inner_size([1920.0, 1080.0])
-            .with_resizable(false)
+            .with_inner_size([900.0, 700.0])
+            .with_min_inner_size([600.0, 400.0])
+            .with_resizable(true)
             .with_maximized(false)
             .with_fullscreen(false)
-            .with_maximize_button(false)
+            .with_maximize_button(true)
             .with_title("LUKS Crypto Wipe v1.0"),
         ..Default::default()
     };

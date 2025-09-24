@@ -1,7 +1,8 @@
 use std::io::{self, Write, Read};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use uuid::Uuid;
-use rand::{thread_rng, Rng, RngCore};
+use rand::{thread_rng, Rng};
 use chrono;
 use serde::Serialize;
 
@@ -139,9 +140,9 @@ fn auto_unmount_device(device_path: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub fn perform_luks_crypto_wipe(device: &str, verify: bool, progress_callback: impl Fn(f32, String) + Send + Sync + 'static) -> io::Result<String> {
+pub fn perform_luks_crypto_wipe(device: &str, verify: bool, progress_callback: impl Fn(f32, String) + Send + Sync + 'static + Clone) -> io::Result<String> {
     let wipe_id = Uuid::new_v4();
-    let device_size = get_device_size(device)?;
+    let _device_size = get_device_size(device).unwrap_or(0); // Use 0 if size detection fails
     progress_callback(0.0, format!("Starting LUKS crypto wipe for {}", device));
 
     // Step 0: Auto-unmount if necessary (especially important for USB devices) - 5%
@@ -171,14 +172,15 @@ pub fn perform_luks_crypto_wipe(device: &str, verify: bool, progress_callback: i
     open_luks_partition(device, &mapper_name, &passphrase)?;
     progress_callback(0.25, "Encrypted partition opened".to_string());
 
-    // Step 4: Fill with random data - 50%
+    // Step 4: Fill with random data - 50% (using dd command like test.rs)
     progress_callback(0.25, "Starting secure data overwrite...".to_string());
+    let callback_clone = progress_callback.clone();
     fill_with_random_data(
         &format!("/dev/mapper/{}", mapper_name),
-        device_size,
-        |fill_progress| {
+        0, // We don't need device size for dd method
+        move |fill_progress| {
             let overall_progress = 0.25 + (fill_progress * 0.50);
-            progress_callback(overall_progress, format!(
+            callback_clone(overall_progress, format!(
                 "Overwriting with encrypted random data: {:.1}%",
                 fill_progress * 100.0
             ));
@@ -277,38 +279,63 @@ fn open_luks_partition(device: &str, mapper_name: &str, passphrase: &str) -> io:
     Ok(())
 }
 
-fn fill_with_random_data(mapper_device: &str, device_size: u64, progress_callback: impl Fn(f32) + Send) -> io::Result<()> {
-    let block_size = 1024 * 1024; // 1MB blocks
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(mapper_device)?;
+fn fill_with_random_data(mapper_device: &str, _device_size: u64, progress_callback: impl Fn(f32) + Send + Sync + 'static) -> io::Result<()> {
+    println!("Starting dd to fill device with random data...");
     
-    let mut buffer = vec![0u8; block_size];
-    let mut bytes_written = 0u64;
-    let mut rng = rand::thread_rng();
+    // Use dd command like in test.rs - more reliable for block devices
+    let mut child = Command::new("dd")
+        .args(&[
+            "if=/dev/urandom",
+            &format!("of={}", mapper_device),
+            "bs=1M",
+            "status=progress"
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
-    while bytes_written < device_size {
-        // Generate random data
-        rng.fill_bytes(&mut buffer);
+    // Monitor the process and provide progress updates
+    let progress_callback_clone = std::sync::Arc::new(progress_callback);
+    let progress_callback_thread = progress_callback_clone.clone();
+    
+    // Use Arc<AtomicBool> to stop progress thread when dd completes
+    let completed = Arc::new(AtomicBool::new(false));
+    let completed_clone = completed.clone();
+    
+    std::thread::spawn(move || {
+        let mut progress: f32 = 0.0;
+        while progress < 1.0 && !completed_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            progress += 0.1; // Increment progress (this is approximate)
+            progress_callback_thread(progress.min(0.95)); // Cap at 95% until completion
+        }
+    });
+
+    let output = child.wait_with_output()?;
+    
+    // Stop the progress thread
+    completed.store(true, Ordering::Relaxed);
+    
+    // Check if dd failed for reasons other than "no space left" (which is expected)
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("dd stderr: {}", stderr);
         
-        // Calculate how much to write in this iteration
-        let remaining = device_size - bytes_written;
-        let write_size = if remaining < block_size as u64 {
-            remaining as usize
-        } else {
-            block_size
-        };
-
-        // Write the data
-        file.write_all(&buffer[..write_size])?;
-        bytes_written += write_size as u64;
-
-        // Update progress
-        let progress = bytes_written as f32 / device_size as f32;
-        progress_callback(progress);
+        // "No space left on device" is expected and means success for our use case
+        if !stderr.contains("No space left on device") && 
+           !stderr.contains("end of device") && 
+           !stderr.contains("not enough space") {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("dd failed: {}", stderr)
+            ));
+        }
     }
-
-    file.sync_all()?;
+    
+    // Final progress update
+    progress_callback_clone(1.0);
+    
+    println!("Random data fill completed");
     Ok(())
 }
 
