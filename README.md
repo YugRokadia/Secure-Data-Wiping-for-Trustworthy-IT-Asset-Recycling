@@ -1,6 +1,6 @@
 # LUKS Crypto Wipe Tool
 
-**Secure cryptographic data destruction tool using LUKS encryption.**
+**Tool to securely destroy data in Storage Devices using Cryptographic overwrite.**
 
 ## Features
 - Interactive device/partition selection
