@@ -1,15 +1,15 @@
-# 🔥 LUKS Crypto Wipe Tool
+# LUKS Crypto Wipe Tool
 
 **Secure cryptographic data destruction tool using LUKS encryption.**
 
-## 📋 Features
+## Features
 - Interactive device/partition selection
 - LUKS2 AES-XTS-256 encryption
 - Cryptographic key destruction
 - Military-grade data destruction
 - SystemRescue OS compatible
 
-## 🛠️ Build Instructions
+## Build Instructions
 
 ### Prerequisites
 ```bash
@@ -33,7 +33,7 @@ cargo build --release
 # Executable will be at: target/release/wipeshit
 ```
 
-## 🚀 Usage
+## Usage
 
 ### Interactive Mode
 ```bash
@@ -50,7 +50,7 @@ sudo ./target/release/wipeshit /dev/sdX
 sudo ./target/release/wipeshit /dev/sdX --force --verify
 ```
 
-## 💽 SystemRescue USB Deployment
+## SystemRescue USB Deployment
 
 ### Add to Existing SystemRescue USB
 ```bash
@@ -61,15 +61,15 @@ cp target/release/wipeshit /media/user/RESCUE1202/
 mount /dev/sdb1 /mnt && cp /mnt/wipeshit /tmp/ && chmod +x /tmp/wipeshit && /tmp/wipeshit
 ```
 
-## ⚠️ WARNING
+## WARNING
 This tool will PERMANENTLY DESTROY all data on selected devices. Use with extreme caution!
 
-## 🔒 Security
+## Security
 - LUKS2 encryption with AES-XTS-256
 - 512-bit encryption keys
 - SHA-256 hashing
 - Cryptographic key destruction
 - Forensically unrecoverable results
 
-## 📞 Support
+## Support
 Built for SIH 2025 - Secure Data Destruction Project
