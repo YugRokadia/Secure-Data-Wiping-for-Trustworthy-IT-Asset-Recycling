@@ -16,22 +16,25 @@ The storage itself is never touched. Only the key is destroyed. Without it, the 
 
 ---
 
-## How It Works
+## ⚡ How It Works
+
+<div align="center">
 
 ```mermaid
 flowchart LR
-    A[Target Device] --> B[LUKS2 Format<br/>AES-XTS-256]
-    B --> C[Random 512-bit Key]
-    C --> D[Key Destruction]
-    D --> E[Data Forensically<br/>Unrecoverable]
+    A[💽 Target Device] --> B[🔐 LUKS2 Format<br/>AES-XTS-256]
+    B --> C[🗝️ Random 512-bit Key]
+    C --> D[🧨 Key Destruction]
+    D --> E[☠️ Data Forensically<br/>Unrecoverable]
 
-    style A fill:#1c1a2e,stroke:#8b85c4,color:#f1efff
-    style B fill:#1c1a2e,stroke:#8b85c4,color:#f1efff
-    style C fill:#1c1a2e,stroke:#8b85c4,color:#f1efff
-    style D fill:#3a2418,stroke:#eeab77,color:#f1efff
-    style E fill:#141220,stroke:#8b85c4,color:#f1efff
+    style A fill:#2d1b4e,stroke:#A78BFA,color:#fff
+    style B fill:#2d1b4e,stroke:#A78BFA,color:#fff
+    style C fill:#2d1b4e,stroke:#A78BFA,color:#fff
+    style D fill:#4a148c,stroke:#ff5252,color:#fff
+    style E fill:#1e2327,stroke:#00c853,color:#fff
 ```
 
+</div>
 ---
 
 ## Features
